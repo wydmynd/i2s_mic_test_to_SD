@@ -1,50 +1,72 @@
-
 #include <driver/i2s.h>
 #include <SD.h>
 #include <FS.h>
-
+#define SAMPLE_RATE (16000)
 #define I2S_WS 25
 #define I2S_SD 33
 #define I2S_SCK 32
 #define I2S_PORT I2S_NUM_0
-#define bufferLen 512
+#define bufferLen 256
 
 // SD Card pins
 #define SD_CS 5
 
-int16_t sBuffer[bufferLen];
+int32_t sBuffer[bufferLen];
+int16_t outputBuffer[bufferLen];
+
+
 File wavFile;
 const int sampleRate = 16000;
-const int bitsPerSample = 16;
+const int bitsPerSample = 32;
 const int numChannels = 1;
-unsigned long recordingDuration = 10000; // Recording duration in milliseconds (10 seconds)
+unsigned long recordingDuration = 5000; // Recording duration in milliseconds (10 seconds)
 unsigned long startTime;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Setup I2S ...");
+  while(!Serial) { delay(100); } // Wait for serial to be ready
+  Serial.println("\nSetup starting...");
 
   delay(1000);
-  i2s_install();
-  i2s_setpin();
-  i2s_start(I2S_PORT);
+  
+  Serial.println("Installing I2S driver...");
+  esp_err_t err = i2s_install();
+  if (err != ESP_OK) {
+    Serial.printf("Failed to install I2S driver: %d\n", err);
+    return;
+  }
+  
+  Serial.println("Setting I2S pins...");
+  err = i2s_setpin();
+  if (err != ESP_OK) {
+    Serial.printf("Failed to set I2S pins: %d\n", err);
+    return;
+  }
+  
+  Serial.println("Starting I2S...");
+  err = i2s_start(I2S_PORT);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to start I2S: %d\n", err);
+    return;
+  }
 
-  // Initialize SD card
+  Serial.println("Initializing SD card...");
   if (!SD.begin(SD_CS)) {
     Serial.println("SD card initialization failed!");
     return;
   }
-  Serial.println("SD card initialized.");
+  Serial.println("SD card initialized successfully.");
 
-  // Create WAV file
+  Serial.println("Creating WAV file...");
   wavFile = SD.open("/recording.wav", FILE_WRITE);
   if (!wavFile) {
     Serial.println("Failed to create file!");
     return;
   }
+  Serial.println("WAV file created successfully.");
 
-  // Write WAV header
-  writeWavHeader(wavFile, sampleRate, bitsPerSample, numChannels);
+  Serial.println("Writing WAV header...");
+  writeWavHeader(wavFile, sampleRate, 16, numChannels);
 
   startTime = millis();
   Serial.println("Recording started...");
@@ -53,45 +75,71 @@ void setup() {
 void loop() {
   if (millis() - startTime < recordingDuration) {
     size_t bytesIn = 0;
-    esp_err_t result = i2s_read(I2S_PORT, &sBuffer, bufferLen, &bytesIn, portMAX_DELAY);
+    esp_err_t result = i2s_read(I2S_PORT, &sBuffer, bufferLen * sizeof(int32_t), &bytesIn, portMAX_DELAY);
     if (result == ESP_OK) {
-      wavFile.write((const byte*)sBuffer, bytesIn);
+      // Serial.printf("Read %d bytes from I2S\n", bytesIn);
+      
+// Print first few samples before conversion
+      Serial.println("Before conversion:");
+      for (int i = 0; i < 5; i++) {
+        Serial.printf("%d ", sBuffer[i]);
+      }
+      Serial.println();
+      
+  // Convert samples from 24-bit to 16-bit
+      for (int i = 0; i < bufferLen; i++) {
+        int32_t temp = sBuffer[i] >> 8; // Shift by 8 
+        outputBuffer[i] = (int16_t)temp;
+      }
+
+       // Print first few samples after conversion
+      Serial.println("After conversion:");
+      for (int i = 0; i < 5; i++) {
+        Serial.printf("%d ", outputBuffer[i]);
+      }
+      Serial.println();
+      
+      size_t bytesWritten = wavFile.write((const byte*)outputBuffer, bufferLen * sizeof(int16_t));
+      // Serial.printf("Wrote %d bytes to SD card\n", bytesWritten);
+    } else {
+      Serial.printf("Error reading from I2S: %d\n", result);
     }
   } else if (wavFile) {
-    // Update WAV header with final size
+    Serial.println("Recording finished. Updating WAV header...");
     unsigned long fileSize = wavFile.size();
     updateWavHeader(wavFile, fileSize);
     wavFile.close();
-    Serial.println("Recording finished.");
+    Serial.println("WAV file closed. Recording complete.");
     while(1); // Stop the program
   }
 }
 
-void i2s_install() {
-  const i2s_config_t i2s_config = {
-    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
-    .sample_rate = sampleRate,
-    .bits_per_sample = i2s_bits_per_sample_t(bitsPerSample),
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S),
-    .intr_alloc_flags = 0, // default interrupt priority
+esp_err_t i2s_install() {
+  
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+    .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
+    .intr_alloc_flags = 0,
     .dma_buf_count = 8,
     .dma_buf_len = bufferLen,
     .use_apll = false
   };
 
-  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  return i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
 }
 
-void i2s_setpin() {
+esp_err_t i2s_setpin() {
   const i2s_pin_config_t pin_config = {
     .bck_io_num = I2S_SCK,
     .ws_io_num = I2S_WS,
-    .data_out_num = -1,
+    .data_out_num = I2S_PIN_NO_CHANGE,
     .data_in_num = I2S_SD
   };
 
-  i2s_set_pin(I2S_PORT, &pin_config);
+  return i2s_set_pin(I2S_PORT, &pin_config);
 }
 
 void writeWavHeader(File file, int sampleRate, int bitsPerSample, int numChannels) {
