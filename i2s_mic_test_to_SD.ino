@@ -86,9 +86,16 @@ void loop() {
       }
       Serial.println();
       
-  // Convert samples from 24-bit to 16-bit
+      // Extract 24-bit samples from 32-bit variable and downscale to 16-bit
       for (int i = 0; i < bufferLen; i++) {
-        int32_t temp = sBuffer[i] >> 8; // Shift by 8 
+        int32_t temp = sBuffer[i];
+        // Shift right by 11 bits. works for soft sounds, louder sounds may need more reduction
+        temp = (temp >> 11);
+        // Check the sign bit and extend it if necessary
+        if (temp & 0x8000) {
+          temp |= 0xFFFF0000;
+        }
+        
         outputBuffer[i] = (int16_t)temp;
       }
 
